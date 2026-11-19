@@ -14,6 +14,7 @@ import { formatDateTime, getDisplayTimeZone } from '../format'
 import { cloneProtocol, defaultTCP, defaultUDP, payloadFromCreationDraft, presetFor, type JobCreationDraft } from '../job-form'
 import { useJobCreationDraft } from '../job-creation-draft'
 import { issueFirstScanIntent } from '../firstScanIntent'
+import { useDraftNavigation } from '../hooks/useDraftNavigation'
 import { readPerimeterPrefill, type PerimeterPrefill } from '../perimeter-prefill'
 
 type SetupStep = 'targets' | 'coverage' | 'schedule' | 'review'
@@ -39,7 +40,6 @@ export function MonitorSetup() {
   const [fieldError, setFieldError] = useState('')
   const [actionError, setActionError] = useState('')
   const [saving, setSaving] = useState(false)
-  const [discardNavigation, setDiscardNavigation] = useState<{ destination: string; historyPop: boolean } | null>(null)
   const [scheduleInput, setScheduleInput] = useState({ schedule: draft.fields.schedule, timezone: draft.fields.timezone })
   const [addedDestination, setAddedDestination] = useState('')
   const [createDestinationOpen, setCreateDestinationOpen] = useState(false)
@@ -47,8 +47,6 @@ export function MonitorSetup() {
   const [previewAttempt, setPreviewAttempt] = useState(0)
   const previewSequence = useRef(0)
   const createLock = useRef(false)
-  const currentHistoryEntry = useRef<{ path: string; state: unknown } | null>(null)
-  const allowHistoryPop = useRef(false)
   const headingRef = useRef<HTMLHeadingElement>(null)
   const perimeterPrefillHandled = useRef<string | null>(null)
 
@@ -132,68 +130,14 @@ export function MonitorSetup() {
   }, [step, previewAttempt, previewSignature])
 
   useEffect(() => {
-    currentHistoryEntry.current = { path: `${location.pathname}${location.search}${location.hash}`, state: window.history.state }
-  }, [location.hash, location.key, location.pathname, location.search])
-
-  useEffect(() => {
     headingRef.current?.focus()
   }, [step])
 
-  useEffect(() => {
-    if (!dirty && !saving) return
-    const currentPath = `${location.pathname}${location.search}${location.hash}`
-    const onInternalLinkClick = (event: MouseEvent) => {
-      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
-      const target = event.target
-      if (!(target instanceof Element)) return
-      const anchor = target.closest<HTMLAnchorElement>('a[href]')
-      if (!anchor || anchor.hasAttribute('download') || (anchor.target && anchor.target !== '_self')) return
-      const destination = new URL(anchor.href, window.location.href)
-      if (destination.origin !== window.location.origin) return
-      const nextPath = `${destination.pathname}${destination.search}${destination.hash}`
-      if (nextPath === currentPath) return
-      if (saving) {
-        event.preventDefault()
-        event.stopPropagation()
-        return
-      }
-      if (isCreationPath(nextPath)) return
-      event.preventDefault()
-      event.stopPropagation()
-      setDiscardNavigation({ destination: nextPath, historyPop: false })
-    }
-    const onPopState = (event: PopStateEvent) => {
-      if (allowHistoryPop.current) {
-        allowHistoryPop.current = false
-        return
-      }
-      const nextPath = `${window.location.pathname}${window.location.search}${window.location.hash}`
-      if (nextPath === currentPath) return
-      if (saving) {
-        event.stopImmediatePropagation()
-        const current = currentHistoryEntry.current
-        if (current) window.history.pushState(current.state, '', current.path)
-        return
-      }
-      if (isCreationPath(nextPath)) return
-      event.stopImmediatePropagation()
-      const current = currentHistoryEntry.current
-      setDiscardNavigation({ destination: nextPath, historyPop: true })
-      if (current) window.history.pushState(current.state, '', current.path)
-    }
-    const onBeforeUnload = (event: BeforeUnloadEvent) => {
-      event.preventDefault()
-      event.returnValue = ''
-    }
-    document.addEventListener('click', onInternalLinkClick, true)
-    window.addEventListener('popstate', onPopState, true)
-    window.addEventListener('beforeunload', onBeforeUnload)
-    return () => {
-      document.removeEventListener('click', onInternalLinkClick, true)
-      window.removeEventListener('popstate', onPopState, true)
-      window.removeEventListener('beforeunload', onBeforeUnload)
-    }
-  }, [dirty, location.hash, location.pathname, location.search, saving])
+  const { discardNavigation, requestNavigation, confirmDiscard, cancelDiscard } = useDraftNavigation({
+    dirty,
+    saving,
+    allowDestination: isCreationPath,
+  })
 
   function updateFields(values: Partial<typeof draft.fields>) {
     updateDraft(current => ({ ...current, fields: { ...current.fields, ...values } }))
@@ -203,19 +147,6 @@ export function MonitorSetup() {
   function updateTargets(targets: string[]) {
     updateDraft(current => ({ ...current, targets }))
     setFieldError('')
-  }
-
-  function requestNavigation(destination: string) {
-    if (saving) return
-    if (isCreationPath(destination)) {
-      navigate(destination)
-      return
-    }
-    if (dirty) {
-      setDiscardNavigation({ destination, historyPop: false })
-      return
-    }
-    navigate(destination)
   }
 
   function goTo(next: SetupStep) {
@@ -572,21 +503,7 @@ export function MonitorSetup() {
     </div>}
     </fieldset>
 
-    {discardNavigation && <ActionDialog title="Discard monitor changes?" description="This monitor configuration has not been saved. Leave the setup and discard the draft? A destination created from this flow is a separate resource and will remain in Notifications." confirmLabel="Discard changes" destructive onConfirm={() => {
-      const navigation = discardNavigation
-      setDiscardNavigation(null)
-      if (navigation.historyPop) {
-        allowHistoryPop.current = true
-        window.history.back()
-      } else navigate(navigation.destination)
-    }} onCancel={() => {
-      const navigation = discardNavigation
-      setDiscardNavigation(null)
-      if (navigation.historyPop) {
-        const current = currentHistoryEntry.current
-        if (current) window.history.replaceState(current.state, '', current.path)
-      }
-    }} />}
+    {discardNavigation && <ActionDialog title="Discard monitor changes?" description="This monitor configuration has not been saved. Leave the setup and discard the draft? A destination created from this flow is a separate resource and will remain in Notifications." confirmLabel="Discard changes" destructive onConfirm={confirmDiscard} onCancel={cancelDiscard} />}
   </section>
 }
 

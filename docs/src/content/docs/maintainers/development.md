@@ -453,3 +453,40 @@ listed struct changes. For database migrations, update
 upgrades from the previous schema; a new database starts from the frozen
 schema 54 baseline in `internal/store/schema_baseline.go`, which must not
 change, and then runs every later migration.
+
+## Unsaved monitor drafts
+
+The guided setup and advanced editor share `src/hooks/useDraftNavigation.ts`.
+It intercepts internal links, browser history changes, and page unloads while
+a draft is dirty or saving. Each page owns its draft, discard dialog, permitted
+creation paths, and destination state. Canceling a browser Back keeps the
+restored history entry and draft; confirming repeats Back. Keep both page
+regressions and the shared hook tests when changing this protocol.
+
+## Actions storage usage
+
+With an authenticated GitHub CLI (`gh`) and Node.js, run from the repository root:
+
+```sh
+node scripts/actions-storage.mjs crypt0rr/EdgeWatch 8192 > actions-storage.json
+```
+
+The command only reads GitHub. Its JSON lists every cache and artifact by ID,
+name, size in bytes, age in days, and branch/ref, largest first. Cache rows
+include last access; artifact rows include expiration and their workflow event
+(for example `pull_request` or `push`), so PR diagnostics can be distinguished
+from main builds. It follows cache and artifact pages, then reads workflow-run pages until it
+has the available event metadata. Deleted runs are labeled `unknown`.
+An API failure exits unsuccessfully instead of presenting partial totals.
+The snapshot contains branch names; keep it outside version control.
+
+The optional threshold is a local cleanup signal in MiB (default 8192), not
+GitHub's billing quota: caches and artifacts have distinct storage policies.
+`cleanupSuggested` compares their combined reported bytes with that threshold.
+Inspect `cacheBytes`, `artifactBytes`, and individual rows before cleanup;
+expired artifacts may still appear in the API. Choose a threshold suitable for
+the account. Prioritize old PR caches and expired or superseded diagnostics,
+and retain current run coverage needed for debugging. Record before/after
+snapshots when cleaning up or changing retention. Existing CI retention stays
+at one day for intermediate coverage and 14 days for final diagnostics; release
+candidate retention and the release's cache-free build remain unchanged.

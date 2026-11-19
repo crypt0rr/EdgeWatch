@@ -14,6 +14,7 @@ import { editableDuration, formatDateTime, getDisplayTimeZone } from '../format'
 import { cloneJobCreationDraft, cloneProtocol, defaultTCP, jobFormSchema, newJobCreationDraft, optionalNumber, presetFor, toJobFormPayload, type JobFormFields } from '../job-form'
 import { useOptionalJobCreationDraft } from '../job-creation-draft'
 import { jobListReturnToFromState } from '../job-list-state'
+import { useDraftNavigation } from '../hooks/useDraftNavigation'
 import { useServerDraft } from '../hooks/useServerDraft'
 
 export function JobEditor() {
@@ -52,7 +53,6 @@ export function JobEditor() {
   const [suggestionInput, setSuggestionInput] = useState({ schedule: defaults.schedule, timezone: defaults.timezone })
   const [dismissedSuggestion, setDismissedSuggestion] = useState('')
   const [rebaselinePrompt, setRebaselinePrompt] = useState<{ values: JobFormFields; changes: string[] } | null>(null)
-  const [discardNavigation, setDiscardNavigation] = useState<{ destination: string; historyPop: boolean; state?: unknown } | null>(null)
   const loadedRevision = useRef<{ id?: string; revision: number } | null>(null)
   const saveLock = useRef(false)
   // Switching a protocol off keeps its settings so switching it back on in
@@ -60,8 +60,6 @@ export function JobEditor() {
   const lastTCP = useRef<Protocol | undefined>(cloneJobCreationDraft(initialDraft).lastTCP)
   const lastUDP = useRef<Protocol | undefined>(cloneJobCreationDraft(initialDraft).lastUDP)
   const cronInputRef = useRef<HTMLInputElement | null>(null)
-  const currentHistoryEntry = useRef<{ path: string; state: unknown } | null>(null)
-  const allowHistoryPop = useRef(false)
   const { register, handleSubmit, reset, watch, setValue, formState: { errors: formErrors, isDirty } } = useForm<JobFormFields>({
     defaultValues: defaults,
     resolver: zodResolver(jobFormSchema),
@@ -100,22 +98,12 @@ export function JobEditor() {
   const showSuggestion = !!currentSuggestion?.suggested && suggestionKey !== dismissedSuggestion
 
   const hasDraftChanges = isDirty || draftDirty || (!edit && (creation?.dirty ?? false))
-  const requestNavigation = (destination: string, state?: unknown) => {
-    if (saving) return
-    if (!edit && isCreationPath(destination)) {
-      navigate(destination)
-      return
-    }
-    if (hasDraftChanges) {
-      setDiscardNavigation({ destination, historyPop: false, state })
-      return
-    }
-    navigate(destination, { state })
-  }
-
-  useEffect(() => {
-    currentHistoryEntry.current = { path: `${location.pathname}${location.search}${location.hash}`, state: window.history.state }
-  }, [location.hash, location.key, location.pathname, location.search])
+  const { discardNavigation, requestNavigation, confirmDiscard, cancelDiscard } = useDraftNavigation({
+    dirty: hasDraftChanges,
+    saving,
+    allowDestination: destination => !edit && isCreationPath(destination),
+    stateForLink: destination => edit && destination.pathname === jobPath ? { returnTo: jobsReturnTo } : undefined,
+  })
 
   useEffect(() => {
     if (edit || !updateCreationDraft) return
@@ -143,68 +131,6 @@ export function JobEditor() {
     }), hasDraftChanges)
   }, [edit, updateCreationDraft, targets, tcp, udp, selectedNotificationIDs, notificationSelectionTouched, scheduleEnabled, hasDraftChanges])
 
-  useEffect(() => {
-    if (!hasDraftChanges && !saving) return
-    const currentPath = `${location.pathname}${location.search}${location.hash}`
-    const onInternalLinkClick = (event: MouseEvent) => {
-      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
-      const target = event.target
-      if (!(target instanceof Element)) return
-      const anchor = target.closest<HTMLAnchorElement>('a[href]')
-      if (!anchor || anchor.hasAttribute('download') || (anchor.target && anchor.target !== '_self')) return
-      const destination = new URL(anchor.href, window.location.href)
-      if (destination.origin !== window.location.origin) return
-      const nextPath = `${destination.pathname}${destination.search}${destination.hash}`
-      if (nextPath === currentPath) return
-      if (saving) {
-        event.preventDefault()
-        event.stopPropagation()
-        return
-      }
-      if (!edit && isCreationPath(currentPath) && isCreationPath(nextPath)) return
-      event.preventDefault()
-      event.stopPropagation()
-      // The intercepted link's route state is not in the DOM. A link back to
-      // the job carries the job list's path, as the editor's own links do.
-      const state = edit && destination.pathname === jobPath ? { returnTo: jobsReturnTo } : undefined
-      setDiscardNavigation({ destination: nextPath, historyPop: false, state })
-    }
-    const onPopState = (event: PopStateEvent) => {
-      if (allowHistoryPop.current) {
-        allowHistoryPop.current = false
-        return
-      }
-      const nextPath = `${window.location.pathname}${window.location.search}${window.location.hash}`
-      if (nextPath === currentPath) return
-      if (saving) {
-        event.stopImmediatePropagation()
-        const current = currentHistoryEntry.current
-        if (current) window.history.pushState(current.state, '', current.path)
-        return
-      }
-      if (!edit && isCreationPath(currentPath) && isCreationPath(nextPath)) return
-
-      // Browser history has already moved by the time popstate fires. Stop
-      // BrowserRouter from applying that location, then restore the exact
-      // current router entry and let the user either cancel or repeat the pop.
-      event.stopImmediatePropagation()
-      const current = currentHistoryEntry.current
-      setDiscardNavigation({ destination: nextPath, historyPop: true })
-      if (current) window.history.pushState(current.state, '', current.path)
-    }
-    const onBeforeUnload = (event: BeforeUnloadEvent) => {
-      event.preventDefault()
-      event.returnValue = ''
-    }
-    document.addEventListener('click', onInternalLinkClick, true)
-    window.addEventListener('popstate', onPopState, true)
-    window.addEventListener('beforeunload', onBeforeUnload)
-    return () => {
-      document.removeEventListener('click', onInternalLinkClick, true)
-      window.removeEventListener('popstate', onPopState, true)
-      window.removeEventListener('beforeunload', onBeforeUnload)
-    }
-  }, [edit, hasDraftChanges, jobPath, jobsReturnTo, location.hash, location.pathname, location.search, saving])
   const applyServerJob = (data: NonNullable<typeof existing.data>) => {
     // The API returns Go durations (192h0m0s). Show them in the units the
     // editor suggests; both forms save the same duration.
@@ -531,7 +457,7 @@ export function JobEditor() {
         </fieldset>
       </form>
       {rebaselinePrompt && <ActionDialog title="Confirm scan-scope change" description="This changes the scan scope. The current baseline and active incidents will be cleared, and a new baseline will be learned." confirmLabel="Reset baseline and save" destructive onConfirm={async () => { await save(rebaselinePrompt.values, true) }} onCancel={() => { setRebaselinePrompt(null); setError('Scope change canceled.') }} error={error}>{rebaselinePrompt.changes.length > 0 && <ul className="scope-change-list">{rebaselinePrompt.changes.map(change => <li key={change}>{change}</li>)}</ul>}</ActionDialog>}
-      {discardNavigation && <ActionDialog title="Discard unsaved changes?" description="Your job configuration changes have not been saved. Leave this page and discard the draft?" confirmLabel="Discard changes" destructive onConfirm={() => { const navigation = discardNavigation; setDiscardNavigation(null); if (navigation.historyPop) { allowHistoryPop.current = true; window.history.back() } else navigate(navigation.destination, { state: navigation.state }) }} onCancel={() => setDiscardNavigation(null)} />}
+      {discardNavigation && <ActionDialog title="Discard unsaved changes?" description="Your job configuration changes have not been saved. Leave this page and discard the draft?" confirmLabel="Discard changes" destructive onConfirm={confirmDiscard} onCancel={cancelDiscard} />}
     </section>
   )
 }

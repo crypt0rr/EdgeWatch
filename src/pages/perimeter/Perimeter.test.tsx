@@ -376,7 +376,7 @@ describe('Perimeter page', () => {
     vi.mocked(deletePerimeterSeed).mockRejectedValueOnce(new APIError('perimeter range not found', 'not_found', undefined, 404))
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Remove range' }))
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
-    expect(screen.getByText('203.0.113.0/24 was already removed.')).toHaveFocus()
+    await waitFor(() => expect(screen.getByText('203.0.113.0/24 was already removed.')).toHaveFocus())
   })
 })
 

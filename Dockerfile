@@ -19,7 +19,7 @@ RUN if [ "$PREBUILT_FRONTEND" = "1" ]; then \
       npm run build; \
     fi
 
-FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine3.24@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf AS naabu
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine3.24@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS naabu
 ARG NAABU_VERSION=v2.7.0
 ARG NAABU_COMMIT=041b70fd396e95b5ed2c19f879c18247078243bc
 ARG NAABU_X_NET_VERSION=v0.62.0
@@ -67,7 +67,7 @@ RUN case "${TARGETARCH}" in \
     && interp="$(go run /tmp/interp.go /out/naabu)" \
     && if [ -n "${interp}" ] && [ "${interp}" != "${loader}" ]; then echo "naabu names ${interp}, not ${loader}" >&2; exit 1; fi
 
-FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine3.24@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine3.24@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS build
 WORKDIR /src
 RUN apk add --no-cache ca-certificates=20261020-r0 git=2.54.1-r0
 COPY go.mod go.sum ./
@@ -88,9 +88,9 @@ RUN if [ "$PREBUILT_EDGEWATCH" = "1" ]; then \
     fi
 
 FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
-# zlib is part of the base image; pinning it here installs the security
-# update that the base image predates.
-RUN apk add --no-cache ca-certificates=20261020-r0 gcompat=1.1.0-r4 nmap=7.99-r0 nmap-scripts=7.99-r0 tzdata=2026f-r0 zlib=1.4-r0 \
+# These zlib and OpenSSL pins install security updates that the base
+# image predates.
+RUN apk add --no-cache ca-certificates=20261020-r0 gcompat=1.1.0-r4 libcrypto3=3.5.9-r1 libssl3=3.5.9-r1 nmap=7.99-r0 nmap-scripts=7.99-r0 tzdata=2026f-r0 zlib=1.4-r0 \
     && mkdir -p /etc/edgewatch /var/lib/edgewatch /run/secrets \
     && chmod 0750 /etc/edgewatch /var/lib/edgewatch /run/secrets \
     && addgroup -S -g 65532 edgewatch-scanner \

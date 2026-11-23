@@ -9,7 +9,7 @@
       "customType": "regex",
       "managerFilePatterns": ["/(^|/)Dockerfile$/"],
       "matchStrings": [
-        "(?<depName>ca-certificates|gcompat|git|nmap|nmap-scripts|tzdata|zlib)=(?<currentValue>[0-9][0-9A-Za-z.+~-]*)"
+        "(?<depName>ca-certificates|gcompat|git|libcrypto3|libssl3|nmap|nmap-scripts|tzdata|zlib)=(?<currentValue>[0-9][0-9A-Za-z.+~-]*)"
       ],
       "datasourceTemplate": "repology",
       "packageNameTemplate": "alpine_3_24/{{{depName}}}",
@@ -130,6 +130,12 @@
     }
   ],
   "packageRules": [
+    {
+      "description": "Update the two Alpine OpenSSL libraries together because both pins follow the same package revision.",
+      "matchDatasources": ["repology"],
+      "matchDepNames": ["libcrypto3", "libssl3"],
+      "groupName": "Alpine OpenSSL libraries"
+    },
     {
       "description": "Renovate leaves the go directive alone by default. Bump it with each Go release: CI and the release build with the Go version that go.mod names.",
       "matchManagers": ["gomod"],

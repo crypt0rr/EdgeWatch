@@ -37,7 +37,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: 24.22.2
+          node-version: 24.22.3
           cache: npm
       - name: Install frontend dependencies
         run: npm ci
@@ -124,7 +124,7 @@ jobs:
       - name: Set up Node for embedded assets
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: 24.22.2
+          node-version: 24.22.3
           cache: npm
       - name: Build embedded frontend assets
         run: npm ci && npm run build
@@ -179,7 +179,7 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         if: matrix.shard == 'other'
         with:
-          node-version: 24.22.2
+          node-version: 24.22.3
           cache: npm
       - name: Build embedded frontend assets
         if: matrix.shard == 'other'
@@ -261,7 +261,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: 24.22.2
+          node-version: 24.22.3
       - name: Download shard coverage
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -322,7 +322,7 @@ jobs:
       - name: Set up Node for release-style inputs
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: 24.22.2
+          node-version: 24.22.3
           cache: npm
       - name: Validate Compose deployment
         run: |
@@ -355,7 +355,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
-          driver-opts: image=docker.io/moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
+          driver-opts: image=docker.io/moby/buildkit:v0.35.0@sha256:aa632b921ef07411d2cb77292cd34213d4f7b384001d6fceef1e1f25bf9752bb
       - name: Reject missing prebuilt frontend assets
         run: ./scripts/test-prebuilt-frontend-fails-closed.sh
       # Each image build keeps its BuildKit cache in its own scope so the
@@ -451,7 +451,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
-          driver-opts: image=docker.io/moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
+          driver-opts: image=docker.io/moby/buildkit:v0.35.0@sha256:aa632b921ef07411d2cb77292cd34213d4f7b384001d6fceef1e1f25bf9752bb
       - name: Build the ARM64 image natively
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:

@@ -30,7 +30,7 @@ ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /naabu
 COPY scripts/verify-naabu-module-versions.sh /usr/local/bin/verify-naabu-module-versions.sh
-RUN apk add --no-cache ca-certificates=20261020-r0 git=2.54.0-r0
+RUN apk add --no-cache ca-certificates=20261020-r0 git=2.54.1-r0
 # Fetch the immutable commit and the human-readable release tag, then verify
 # that the tag still resolves to the pinned commit before compiling.
 RUN git init . \
@@ -69,7 +69,7 @@ RUN case "${TARGETARCH}" in \
 
 FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine3.24@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf AS build
 WORKDIR /src
-RUN apk add --no-cache ca-certificates=20261020-r0 git=2.54.0-r0
+RUN apk add --no-cache ca-certificates=20261020-r0 git=2.54.1-r0
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .

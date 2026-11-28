@@ -198,14 +198,20 @@ const pathReaders: PathReader[] = [
   {
     file: 'src/pages/JobEditor.tsx',
     declaration: 'JobEditor',
-    reads: 8,
-    reason: 'Tells /jobs/new/advanced, which has its own route, from the guided creation, keeps the unsaved-changes guard on the current history entry, and gives the discard dialog\'s destination the job list path when it is the job page.',
+    reads: 2,
+    reason: 'Tells /jobs/new/advanced, which has its own route, from the guided creation, and gives the discard dialog\'s destination the job list path when it is the job page.',
   },
   {
     file: 'src/pages/MonitorSetup.tsx',
     declaration: 'MonitorSetup',
-    reads: 8,
-    reason: 'Clears consumed navigation state in place and keeps the unsaved-changes guard on the current history entry.',
+    reads: 2,
+    reason: 'Clears consumed navigation state in place.',
+  },
+  {
+    file: 'src/hooks/useDraftNavigation.ts',
+    declaration: 'useDraftNavigation',
+    reads: 6,
+    reason: 'Protects unsaved drafts by keeping and restoring the current history entry; chooses no page.',
   },
   {
     file: 'src/pages/JobDetail.tsx',

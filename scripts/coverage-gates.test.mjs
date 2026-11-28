@@ -48,6 +48,7 @@ const frontendReport = (overrides = {}) => {
     'src/firstScanIntent.ts',
     'src/generated/api-types.ts',
     'src/hooks/useServerDraft.ts',
+    'src/hooks/useDraftNavigation.ts',
     'src/incident-time.ts',
     'src/hostSearch.ts',
     'src/host-list-state.ts',

@@ -22,3 +22,6 @@ vite.config.d.ts
 !/internal/webui/dist/.gitkeep
 test-results/
 playwright-report/
+
+# Local Actions storage inventory
+/actions-storage.json

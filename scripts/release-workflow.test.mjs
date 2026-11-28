@@ -771,7 +771,7 @@ const reviewedReleaseRunForms = new Map([
     'if [ "$PREBUILT_EDGEWATCH" = "1" ]; then test -f "/src/release-binaries/linux_${TARGETARCH}/edgewatch" && mkdir -p /out && install -m 0755 "/src/release-binaries/linux_${TARGETARCH}/edgewatch" /out/edgewatch; else CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/edgewatch ./cmd/edgewatch; fi',
   ]],
   ['final', [
-    'apk add --no-cache ca-certificates=20260909-r0 gcompat=1.1.0-r4 nmap=7.99-r0 nmap-scripts=7.99-r0 tzdata=2026f-r0 zlib=1.4-r0 && mkdir -p /etc/edgewatch /var/lib/edgewatch /run/secrets && chmod 0750 /etc/edgewatch /var/lib/edgewatch /run/secrets && addgroup -S -g 65532 edgewatch-scanner && adduser -S -D -H -u 65532 -G edgewatch-scanner -h /nonexistent -s /sbin/nologin edgewatch-scanner && addgroup -S -g 65531 edgewatch-notify && adduser -S -D -H -u 65531 -G edgewatch-notify -h /nonexistent -s /sbin/nologin edgewatch-notify',
+    'apk add --no-cache ca-certificates=20260909-r0 gcompat=1.1.0-r4 libcrypto3=3.5.9-r1 libssl3=3.5.9-r1 nmap=7.99-r0 nmap-scripts=7.99-r0 tzdata=2026f-r0 zlib=1.4-r0 && mkdir -p /etc/edgewatch /var/lib/edgewatch /run/secrets && chmod 0750 /etc/edgewatch /var/lib/edgewatch /run/secrets && addgroup -S -g 65532 edgewatch-scanner && adduser -S -D -H -u 65532 -G edgewatch-scanner -h /nonexistent -s /sbin/nologin edgewatch-scanner && addgroup -S -g 65531 edgewatch-notify && adduser -S -D -H -u 65531 -G edgewatch-notify -h /nonexistent -s /sbin/nologin edgewatch-notify',
   ]],
 ])
 

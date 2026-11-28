@@ -1,7 +1,7 @@
 VERSION ?= dev
 GO_LDFLAGS ?= -s -w -X main.version=$(VERSION)
 GOLANGCI_LINT_VERSION ?= $(shell sed -n '1p' .golangci-lint-version)
-GOVULNCHECK_VERSION ?= v1.9.0
+GOVULNCHECK_VERSION ?= v1.10.0
 export GOLANGCI_LINT_BASE
 # CI supplies the pull request base (or the previous push revision). Local
 # callers can override this with GOLANGCI_LINT_BASE=...; the resolver treats

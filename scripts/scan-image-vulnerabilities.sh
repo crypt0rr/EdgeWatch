@@ -26,7 +26,7 @@ case "$platform" in
 esac
 
 # Renovate updates the tag and digest of this image together.
-grype_image=docker.io/anchore/grype:v0.121.3@sha256:13113eeceab017260370cf540e1d25442c59665fd07d1b09b66d63bb0c282887
+grype_image=docker.io/anchore/grype:v0.122.1@sha256:661583704a253c0448ed63998b5ea2cd9d5a76ee71eedc4aed439b8ce3e93a1c
 allowlist=scripts/naabu-vulncheck-allowlist.txt
 grype_config=.grype.yaml
 for file in Makefile "$allowlist" "$grype_config"; do
